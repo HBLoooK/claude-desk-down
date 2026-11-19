@@ -69,9 +69,16 @@ macOS: `bundle.targets` is trimmed to Windows for day-to-day development; restor
 `["app", "dmg"]` in `apps/claude-deskdown/src-tauri/tauri.conf.json`, then
 `npx tauri build --bundles app,dmg` (needs a signing identity for distribution).
 
-Updater artifacts need a signing key pair:
-set `TAURI_SIGNING_PRIVATE_KEY` (and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`) before building,
-otherwise `createUpdaterArtifacts` fails and auto-update cannot verify.
+Updater artifacts are opt-in (`createUpdaterArtifacts` is off so a plain build works).
+Generate a minisign key pair, put the public key in `plugins.updater.pubkey`, keep the
+private key secret, then:
+
+```bash
+export TAURI_SIGNING_PRIVATE_KEY=...            # and TAURI_SIGNING_PRIVATE_KEY_PASSWORD if needed
+npx tauri build --config '{"bundle":{"createUpdaterArtifacts":true}}'
+```
+
+Without a private key Tauri aborts the release build after bundling.
 
 Core Node tests: `cd crates/claude-local/runtime && node --test managed.test.mjs proxy.test.mjs`  
 (requires local test certs: `scripts/gen-ca.sh`, needs bash + OpenSSL)
