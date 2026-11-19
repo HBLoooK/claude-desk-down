@@ -172,7 +172,18 @@ pub async fn deskdown_import(source: String) -> CommandResult<BookPayload> {
 
 #[tauri::command]
 pub async fn deskdown_fetch_models(base_url: String, api_key: String) -> CommandResult<ModelsPayload> {
-    match upstreams::fetch_models(&base_url, &api_key).await {
+    let outcome = upstreams::fetch_models(&base_url, &api_key).await;
+    crate::log::append("fetch_models", json!({
+        "base_url": base_url,
+        "key_len": api_key.len(),
+        "count": outcome.as_ref().map(|models| models.len()).unwrap_or(0),
+        "error": outcome.as_ref().err().map(|error| error.to_string()),
+    }));
+    match outcome {
+        Ok(models) if models.is_empty() => failed(
+            "Upstream returned an empty model list. Type the model name directly if you know it.",
+            ModelsPayload { models },
+        ),
         Ok(models) => ok(&format!("Fetched {} models.", models.len()), ModelsPayload { models }),
         Err(error) => failed(&format!("{error:#}"), ModelsPayload::default()),
     }

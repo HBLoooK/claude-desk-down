@@ -463,23 +463,40 @@ fn models_url(base_url: &str) -> Result<reqwest::Url> {
 }
 
 /// `GET {base}/v1/models` (Anthropic format, Magpie / Codex++ gateways both support).
+///
+/// Some OpenAI-compatible gateways serve a *different, empty* model list when `anthropic-version`
+/// is present: NVIDIA NIM switches into Anthropic-compat mode on that header and then answers
+/// `/v1/models` with `{"data":[]}`. Ask with the header first (real Anthropic-compatible upstreams
+/// expect it), and retry without it before believing an empty list.
 pub async fn fetch_models(base_url: &str, api_key: &str) -> Result<Vec<UpstreamModel>> {
     let url = models_url(base_url)?;
+    let with_version = request_models(&url, api_key, true).await?;
+    if !with_version.is_empty() {
+        return Ok(with_version);
+    }
+    request_models(&url, api_key, false).await
+}
+
+async fn request_models(
+    url: &reqwest::Url,
+    api_key: &str,
+    anthropic_version: bool,
+) -> Result<Vec<UpstreamModel>> {
     let loopback = matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "::1" | "[::1]"));
     let mut client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(20));
     if loopback {
         // Local gateway shouldn't go through system proxy, or request gets forwarded out.
         client = client.no_proxy();
     }
-    let response = client
+    let mut request = client
         .build()?
-        .get(url)
+        .get(url.clone())
         .header("x-api-key", api_key.trim())
-        .bearer_auth(api_key.trim())
-        .header("anthropic-version", "2023-06-01")
-        .send()
-        .await
-        .context("Failed to fetch model list")?;
+        .bearer_auth(api_key.trim());
+    if anthropic_version {
+        request = request.header("anthropic-version", "2023-06-01");
+    }
+    let response = request.send().await.context("Failed to fetch model list")?;
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
     if !status.is_success() {
@@ -522,6 +539,54 @@ fn parse_models(body: &str) -> Result<Vec<UpstreamModel>> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Minimal HTTP server: answers `/v1/models` with an empty list when `anthropic-version` is
+    /// present and a populated list otherwise, reproducing NVIDIA NIM's behaviour.
+    fn spawn_gateway() -> String {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut has_anthropic_version = false;
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                    let trimmed = line.trim_end();
+                    if trimmed.is_empty() {
+                        break;
+                    }
+                    if trimmed.to_ascii_lowercase().starts_with("anthropic-version:") {
+                        has_anthropic_version = true;
+                    }
+                    line.clear();
+                }
+                let body = if has_anthropic_version {
+                    r#"{"data":[],"has_more":false}"#
+                } else {
+                    r#"{"object":"list","data":[{"id":"meta/muse-glimmer-30b"},{"id":"google/gemma-4-31b-it"}]}"#
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn empty_list_from_anthropic_header_falls_back_to_openai_probe() {
+        let base = spawn_gateway();
+        let models = fetch_models(&base, "k").await.unwrap();
+        assert_eq!(
+            models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
+            ["meta/muse-glimmer-30b", "google/gemma-4-31b-it"]
+        );
+    }
 
     #[test]
     fn model_list_url_never_doubles_the_v1_segment() {

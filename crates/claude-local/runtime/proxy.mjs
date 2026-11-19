@@ -155,6 +155,7 @@ const TEMPLATE_SHELL = (() => {
     return null;
   }
 })();
+// DIAG: capture browser errors into proxy log
 const READ_CACHE = POC_DIR ? path.join(POC_DIR, ".cache") : CACHE_DIR;
 
 const LOG = arg("log", "1") !== "0";
@@ -763,6 +764,19 @@ function resolvedBootstrap() {
   };
   // 录制账号自己的状态，不属于本地模式：身份验证待办（hold_notice）会让 Claude 弹「完成验证以继续」、拦掉回复。
   result.hold_notice = null;
+  // English fork: the recorded template hardcodes zh-Hans. When localization is off, force
+  // English everywhere the client reads locale, otherwise Claude renders a Chinese UI even
+  // though --lang=en-US and config.json say English.
+  if (!runtime.localization) {
+    result.locale = "en-US";
+    if (result.account) result.account.locale = "en-US";
+    if (result.user) result.user.locale = "en-US";
+    if (result.settings) result.settings.locale = "en-US";
+    result.server_localizations = null;
+    if (Array.isArray(result.personalized_greeting)) {
+      result.personalized_greeting = result.personalized_greeting.map((g) => ({ ...g, locale: "en-US" }));
+    }
+  }
   result.personalized_greeting = withDisplayName(result.personalized_greeting);
   if (runtime.cowork) forceCowork(result, template);
   if (!runtime.hubHome) useClassicHome(result, template);
@@ -797,11 +811,19 @@ function restTime(value, fallback) {
  * 两边都要能读出来，否则从另一条路径建的会话打开就是空的。
  */
 function restMessages(c) {
-  if (c.chat_messages?.length) return c.chat_messages;
+  // 旧版状态文件可能把数组字段缺省或显式置为 null；新版前端会直接对其调用 .some()/.map()。
+  const withArrays = (message) => ({
+    ...message,
+    files: Array.isArray(message?.files) ? message.files : [],
+    files_v2: Array.isArray(message?.files_v2) ? message.files_v2 : [],
+    attachments: Array.isArray(message?.attachments) ? message.attachments : [],
+    sync_sources: Array.isArray(message?.sync_sources) ? message.sync_sources : [],
+  });
+  if (c.chat_messages?.length) return c.chat_messages.map(withArrays);
   const messages = [];
   for (const turn of c.turns || []) {
     const created = restTime(turn.created, c.created_at);
-    const entry = (uuid, sender, index, parent, text, extra = {}) => ({
+    const entry = (uuid, sender, index, parent, text, extra = {}) => withArrays({
       uuid, sender, index, parent_message_uuid: parent ?? null, text,
       content: [{ type: "text", text, citations: [] }],
       created_at: created, updated_at: created, ...extra,
@@ -827,6 +849,14 @@ function convToRest(c, { messages = false } = {}) {
   const title = c.name && c.name !== "New conversation" ? c.name : "";
   return {
     ...REST_CONV_TEMPLATE,
+    // 新版前端会对这些字段直接调用数组/对象操作；录制的 conversations.json 可能为空，
+    // 而旧模板字段也可能是 null，因此本地 API 必须保证返回正确形状。
+    settings: REST_CONV_TEMPLATE.settings && typeof REST_CONV_TEMPLATE.settings === "object" ? REST_CONV_TEMPLATE.settings : {},
+    project_uuid: REST_CONV_TEMPLATE.project_uuid ?? null,
+    is_starred: REST_CONV_TEMPLATE.is_starred ?? false,
+    is_archived: REST_CONV_TEMPLATE.is_archived ?? false,
+    files: Array.isArray(REST_CONV_TEMPLATE.files) ? REST_CONV_TEMPLATE.files : [],
+    sync_sources: Array.isArray(REST_CONV_TEMPLATE.sync_sources) ? REST_CONV_TEMPLATE.sync_sources : [],
     uuid: c.uuid,
     id: c.uuid,
     name: title,
@@ -1175,6 +1205,9 @@ function mockApi(req, res, url) {
   if (/\/marketplaces\//.test(p)) {
     return json(res, { ...pageShape, marketplaces: [] });
   }
+  if (method === "GET" && p === "/api/frame/types") return json(res, { ...pageShape, types: [] });
+  if (method === "POST" && /^\/api\/organizations\/[^\/]+\/library\/plugins\/installed_check$/.test(p)) { return json(res, { checked: [] }); }
+  if (method === "GET" && /^\/api\/organizations\/[^\/]+\/plugins\/registry$/.test(p)) return json(res, { data: [] });
   if (p.startsWith("/api/frame/")) return json(res, pageShape);
   // 客户端按 plugin id 读取元数据字典，每个值都必须是对象。
   if (p.endsWith("/cowork_plugin_metadata")) return json(res, {});
@@ -1438,6 +1471,66 @@ function mockApi(req, res, url) {
           role: message.sender === "human" ? "user" : "assistant", content: message.text,
         })) : [{ role: "user", content: prompt }],
       });
+      // 同一份流式落地逻辑供 Anthropic 路由和 OpenAI 回退共用。
+      const completionParser = () => createGatewayStreamParser({
+        text: (text) => {
+          if (settled) return;
+          acc += text;
+          sendEv("content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } });
+        },
+        stop: () => {
+          if (settled) return;
+          settled = true;
+          if (conv && !conv.chat_messages.some((m) => m.uuid === asst)) {
+            pushMessage(conv, { uuid: asst, sender: "assistant", parent: human, text: acc, stop_reason: "end_turn" });
+            stateStore.flush();
+          }
+          sendEv("content_block_stop", { type: "content_block_stop", index: 0 });
+          sendEv("message_delta", { type: "message_delta", delta: { stop_reason: "end_turn" } });
+          sendEv("message_stop", { type: "message_stop" });
+          res.end();
+        },
+        error: fail,
+      });
+      // Anthropic 路由不存在（OpenAI-only 网关，如 NVIDIA NIM）：改走 chat/completions。
+      const completionOpenAIFallback = () => {
+        if (settled) return;
+        const translated = toOpenAI(JSON.parse(payload));
+        const openaiUrl = gatewayTarget(runtime, "/v1/chat/completions");
+        const outgoing = Buffer.from(JSON.stringify(translated));
+        const oreq = (openaiUrl.protocol === "https:" ? https : http).request(
+          {
+            hostname: openaiUrl.hostname,
+            port: openaiUrl.port || (openaiUrl.protocol === "https:" ? 443 : 80),
+            path: openaiUrl.pathname + openaiUrl.search,
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "content-length": outgoing.length,
+              "x-api-key": runtime.key,
+              authorization: `Bearer ${runtime.key}`,
+            },
+          },
+          (ores) => {
+            const chunks = [];
+            ores.on("data", (c) => chunks.push(c));
+            ores.on("end", () => {
+              const text = Buffer.concat(chunks).toString("utf8");
+              if (ores.statusCode < 200 || ores.statusCode >= 300) {
+                return fail(new Error(`上游返回 HTTP ${ores.statusCode}：${text.replace(/\s+/g, " ").slice(0, 300)}`));
+              }
+              const parser = completionParser();
+              parser.write(Buffer.from(openAISSEToAnthropic(text, model)));
+              parser.end();
+            });
+            ores.on("error", (e) => fail(e.message));
+          },
+        );
+        oreq.setTimeout(300_000, () => oreq.destroy(new Error("上游超时：5 分钟没有响应")));
+        oreq.on("error", (e) => fail(e.message));
+        res.on("close", () => { if (!settled) { settled = true; oreq.destroy(); } });
+        oreq.end(outgoing);
+      };
       const target = gatewayTarget(runtime, "/v1/messages");
       const greq = (target.protocol === "https:" ? https : http).request(
         {
@@ -1458,30 +1551,14 @@ function mockApi(req, res, url) {
             const chunks = [];
             let size = 0;
             gres.on("data", (c) => { if (size < 65536) { chunks.push(c); size += c.length; } });
-            gres.on("end", () => fail(gatewayHttpError(gres.statusCode, Buffer.concat(chunks))));
+            gres.on("end", () => {
+              if (gres.statusCode === 404 || gres.statusCode === 405) return completionOpenAIFallback();
+              fail(gatewayHttpError(gres.statusCode, Buffer.concat(chunks)));
+            });
             gres.on("error", (e) => fail(e.message));
             return;
           }
-          const parser = createGatewayStreamParser({
-            text: (text) => {
-              if (settled) return;
-              acc += text;
-              sendEv("content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } });
-            },
-            stop: () => {
-              if (settled) return;
-              settled = true;
-              if (conv && !conv.chat_messages.some((m) => m.uuid === asst)) {
-                pushMessage(conv, { uuid: asst, sender: "assistant", parent: human, text: acc, stop_reason: "end_turn" });
-                stateStore.flush();
-              }
-              sendEv("content_block_stop", { type: "content_block_stop", index: 0 });
-              sendEv("message_delta", { type: "message_delta", delta: { stop_reason: "end_turn" } });
-              sendEv("message_stop", { type: "message_stop" });
-              res.end();
-            },
-            error: fail,
-          });
+          const parser = completionParser();
           gres.on("data", (chunk) => parser.write(chunk));
           gres.on("end", () => parser.end());
           gres.on("error", (e) => fail(e.message));

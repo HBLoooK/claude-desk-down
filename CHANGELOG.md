@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.0-local - 2026-11-19
+
+- Model list: retry without `anthropic-version` when the first probe returns an empty list (NVIDIA NIM).
+- Chat: fall back to `/v1/chat/completions` when the upstream has no Anthropic `/v1/messages` route.
+- Rendering: normalize `files`/`attachments`/`sync_sources` to arrays and fill missing conversation fields so newer Claude Desktop versions render replies.
+- Language: force `en-US` when localization is disabled.
+
 ## 0.1.0 - 2026-11-17
 
 Initial release of ClaudeDeskDown — English fork of ClaudeMom.

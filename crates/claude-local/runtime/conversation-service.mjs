@@ -11,6 +11,7 @@ import crypto from "node:crypto";
 import http from "node:http";
 import https from "node:https";
 import { createGatewayStreamParser, gatewayHttpError, gatewayModel, gatewayTarget, runtimeConfig } from "./runtime.mjs";
+import { fromOpenAI, openAISSEToAnthropic, toOpenAI } from "./openai-bridge.mjs";
 import {
   decode, get, asStr, asMsg, asInt, ld, vi,
   requestMessages, frame, endFrame,
@@ -23,6 +24,57 @@ import {
 } from "./rpc.mjs";
 
 const runtime = runtimeConfig();
+
+/**
+ * 上游没有 Anthropic /v1/messages 路由时（NVIDIA NIM 等 OpenAI-only 网关）改走
+ * /v1/chat/completions，再把 OpenAI 的回复翻译回 Anthropic SSE 喂给同一个解析器。
+ * 只取文本：这条路径不承载 Anthropic 原生工具调用。
+ */
+function openAIStream(messages, model, signal, push, fail, settle) {
+  const payload = JSON.stringify(toOpenAI({
+    model: gatewayModel(runtime, model), max_tokens: 4096, stream: true, messages,
+  }));
+  const u = gatewayTarget(runtime, "/v1/messages");
+  u.pathname = u.pathname.replace(/\/v1\/messages\/?$/, "") + "/v1/chat/completions";
+  const lib = u.protocol === "https:" ? https : http;
+  const chunks = [];
+  const req = lib.request(
+    {
+      hostname: u.hostname, port: u.port || (u.protocol === "https:" ? 443 : 80),
+      path: u.pathname + u.search,
+      method: "POST", timeout: 300000,
+      headers: {
+        "content-type": "application/json",
+        "content-length": Buffer.byteLength(payload),
+        "x-api-key": runtime.key,
+        authorization: `Bearer ${runtime.key}`,
+        accept: "text/event-stream",
+      },
+    },
+    (res) => {
+      res.on("data", (c) => { if (chunks.reduce((n, b) => n + b.length, 0) < 8 * 1024 * 1024) chunks.push(c); });
+      res.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf8");
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          return fail(new Error(`上游返回 HTTP ${res.statusCode}：${text.replace(/\s+/g, " ").slice(0, 300)}`));
+        }
+        const parser = createGatewayStreamParser({
+          text: push,
+          stop: () => push({ end: true }),
+          error: (message) => fail(new Error(message)),
+        });
+        parser.write(Buffer.from(openAISSEToAnthropic(text, gatewayModel(runtime, model))));
+        parser.end();
+        settle();
+      });
+      res.on("error", fail);
+    },
+  );
+  req.on("timeout", () => req.destroy(new Error("上游超时：5 分钟没有响应")));
+  req.on("error", fail);
+  if (signal) signal.addEventListener("abort", () => { try { req.destroy(); } catch {} });
+  req.end(payload);
+}
 
 /**
  * 调网关拿一轮回复的文本增量。
@@ -57,7 +109,16 @@ function anthropicStream(messages, model, signal) {
         const chunks = [];
         let size = 0;
         res.on("data", (c) => { if (size < 65536) { chunks.push(c); size += c.length; } });
-        res.on("end", () => fail(new Error(gatewayHttpError(res.statusCode, Buffer.concat(chunks)))));
+        res.on("end", () => {
+          // Anthropic 路由不存在（OpenAI-only 网关，如 NVIDIA NIM）：改走 chat/completions。
+          if ((res.statusCode === 404 || res.statusCode === 405) && !done) {
+            return openAIStream(messages, model, signal, push, fail, () => {
+              done = true;
+              const n = notify; notify = null; n?.();
+            });
+          }
+          fail(new Error(gatewayHttpError(res.statusCode, Buffer.concat(chunks))));
+        });
         res.on("error", fail);
         return;
       }
@@ -127,6 +188,40 @@ export function createConversationService({ ensureConv, listConvs, log, onChange
   // turn: {humanId,humanIndex,humanParent,prompt,asstId,asstIndex,
   //        groupId,blockId,text,complete,stopReason,created,replied,replyStarted}
   function buildStateUpdate(conv, { includeConversation = true } = {}) {
+    // Conversations created through the REST /completion path store only chat_messages;
+    // the RPC renderer reads turns[]. Derive turns from chat_messages when turns is empty,
+    // otherwise Claude shows "reply failed to load" for those sessions.
+    if ((!conv.turns || !conv.turns.length) && conv.chat_messages?.length) {
+      const msgs = conv.chat_messages;
+      conv.turns = [];
+      conv.nextIndex = 0;
+      for (let i = 0; i < msgs.length; i++) {
+        const m = msgs[i];
+        if (m.sender === "human") {
+          const next = msgs[i + 1];
+          const asst = next?.sender === "assistant" ? next : null;
+          const asstId = asst?.uuid || `${m.uuid}_asst`;
+          conv.turns.push({
+            humanId: m.uuid,
+            humanIndex: conv.nextIndex++,
+            humanParent: m.parent_message_uuid || undefined,
+            prompt: m.text || "",
+            asstId,
+            asstIndex: conv.nextIndex++,
+            groupId: `dgrp_${asstId}`,
+            blockId: `cblk_${asstId}`,
+            text: asst?.text || "",
+            complete: true,
+            stopReason: asst?.stop_reason === "error" ? "error" : "endTurn",
+            created: m.created_at ? new Date(m.created_at) : new Date(),
+            replyStarted: true,
+          });
+          if (asst) i++;
+        }
+      }
+      conv.leafMessageId = conv.turns.length ? conv.turns[conv.turns.length - 1].asstId : null;
+      onChange?.(true);
+    }
     const messages = [], groups = [], blocks = [];
     let leaf;
     for (const t of conv.turns) {
