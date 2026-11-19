@@ -86,14 +86,29 @@ pub fn source_app(deadline: Instant) -> Result<PathBuf> {
             }
         }
     }
-    let candidates = [
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    // Squirrel installs (current Claude Desktop) live in %LOCALAPPDATA%\AnthropicClaude\app-<version>\claude.exe.
+    let anthropic = local.join("AnthropicClaude");
+    if let Ok(entries) = fs::read_dir(&anthropic) {
+        let mut versioned: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir() && path.file_name().is_some_and(|name| name.to_string_lossy().starts_with("app-")))
+            .map(|path| path.join("claude.exe"))
+            .filter(|path| path.is_file())
+            .collect();
+        versioned.sort_by(|left, right| right.cmp(left));
+        candidates.extend(versioned);
+    }
+    candidates.extend([
+        anthropic.join("claude.exe"),
         local.join(r"Microsoft\WindowsApps\claude-desktop.exe"),
         local.join(r"Microsoft\WindowsApps\Claude_pzs8sxrjxfjjc\claude-desktop.exe"),
         local.join(r"Programs\Claude\Claude.exe"),
         local.join(r"Programs\claude-desktop\Claude.exe"),
         local.join(r"Claude\Claude.exe"),
         program.join(r"Claude\Claude.exe"),
-    ];
+    ]);
     if let Some(path) = candidates.into_iter().find(|path| path.is_file()) { return Ok(path); }
     // Query failure != "not installed", return explicit error to avoid mistaking timeout for not installed.
     let output = query?;
