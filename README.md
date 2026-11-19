@@ -70,11 +70,12 @@ macOS: `bundle.targets` is trimmed to Windows for day-to-day development; restor
 `npx tauri build --bundles app,dmg` (needs a signing identity for distribution).
 
 Updater artifacts are opt-in (`createUpdaterArtifacts` is off so a plain build works).
-Generate a minisign key pair, put the public key in `plugins.updater.pubkey`, keep the
-private key secret, then:
+A minisign key pair was generated at `~/.tauri/claude-deskdown-updater.key` (private — keep it
+secret and backed up) and `.key.pub` (already in `plugins.updater.pubkey`). To produce signed
+artifacts, set the private key and opt in:
 
 ```bash
-export TAURI_SIGNING_PRIVATE_KEY=...            # and TAURI_SIGNING_PRIVATE_KEY_PASSWORD if needed
+export TAURI_SIGNING_PRIVATE_KEY=$HOME/.tauri/claude-deskdown-updater.key
 npx tauri build --config '{"bundle":{"createUpdaterArtifacts":true}}'
 ```
 

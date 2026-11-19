@@ -46,7 +46,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDgxQkE2ODhGOTMyRTNCRUYKUldUdk95NlRqMmk2Z1JKdTkxa0tZSW15WGhUbHlRVWRqdWNwWlB2a2x2aGVSNzdSeEpXN3BVMTUK",
       "endpoints": [
         "https://github.com/HBLoooK/claude-desk-down/releases/latest/download/latest.json"
       ],

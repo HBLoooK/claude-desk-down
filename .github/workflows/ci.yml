@@ -1,0 +1,50 @@
+# Run tests on push to main and on every PR; release build checked per platform.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/claude-deskdown/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Frontend: type check, unit tests, production build
+        working-directory: apps/claude-deskdown
+        run: |
+          npm ci
+          npm run check
+          npm test
+          npm run vite:build
+
+      - name: Rust tests
+        run: cargo test --workspace
+
+      # runtime/ca holds the throwaway CA used by the Node service tests.
+      - name: Local service (Node) tests
+        if: matrix.platform == 'macos-latest'
+        working-directory: crates/claude-local/runtime
+        run: |
+          bash scripts/gen-ca.sh
+          node --test --test-timeout=120000 managed.test.mjs proxy.test.mjs scripts/*.test.mjs
+
+      - name: Release build
+        run: cargo build --release -p claude-deskdown
