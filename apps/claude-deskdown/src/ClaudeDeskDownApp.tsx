@@ -182,7 +182,7 @@ export function ClaudeDeskDownApp() {
   const fetchModels = () =>
     run("models", async () => {
       if (!draft) return;
-      const result = await invoke<CommandResult<{ models: UpstreamModel[] }>>("deskdown_fetch_models", { baseUrl: draft.baseUrl, apiKey: "***" });
+      const result = await invoke<CommandResult<{ models: UpstreamModel[] }>>("deskdown_fetch_models", { baseUrl: draft.baseUrl, apiKey: draft.apiKey });
       if (!isOk(result)) return say(result.message, "error");
       const ids = result.models.map((model) => model.id);
       setDraft((current) => {
