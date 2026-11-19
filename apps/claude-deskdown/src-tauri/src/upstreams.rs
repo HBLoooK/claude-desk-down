@@ -453,11 +453,18 @@ pub struct UpstreamModel {
     pub context_window: Option<u64>,
 }
 
+/// Model-list URL for an Anthropic-compatible base URL. Accepts either the root
+/// or a base that already ends in `/v1` (e.g. NVIDIA NIM), without doubling the segment.
+fn models_url(base_url: &str) -> Result<reqwest::Url> {
+    let base = base_url.trim().trim_end_matches('/');
+    let root = base.strip_suffix("/v1").unwrap_or(base);
+    reqwest::Url::parse(&format!("{root}/v1/models"))
+        .with_context(|| format!("Base URL is not a valid address: {base_url}"))
+}
+
 /// `GET {base}/v1/models` (Anthropic format, Magpie / Codex++ gateways both support).
 pub async fn fetch_models(base_url: &str, api_key: &str) -> Result<Vec<UpstreamModel>> {
-    let base = base_url.trim().trim_end_matches('/');
-    let url = reqwest::Url::parse(&format!("{base}/v1/models"))
-        .with_context(|| format!("Base URL is not a valid address: {base_url}"))?;
+    let url = models_url(base_url)?;
     let loopback = matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "::1" | "[::1]"));
     let mut client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(20));
     if loopback {
@@ -515,6 +522,14 @@ fn parse_models(body: &str) -> Result<Vec<UpstreamModel>> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn model_list_url_never_doubles_the_v1_segment() {
+        assert_eq!(models_url(" https://integrate.api.nvidia.com/v1/ ").unwrap().as_str(), "https://integrate.api.nvidia.com/v1/models");
+        assert_eq!(models_url("https://integrate.api.nvidia.com").unwrap().as_str(), "https://integrate.api.nvidia.com/v1/models");
+        assert_eq!(models_url("https://api.example.com/").unwrap().as_str(), "https://api.example.com/v1/models");
+        assert!(models_url("not a url").is_err());
+    }
 
     #[test]
     fn upsert_assigns_ids_names_and_selects_the_first_profile() {
