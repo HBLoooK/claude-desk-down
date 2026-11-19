@@ -1,0 +1,31 @@
+//! Core for Claude Desktop full-feature mode: connect original Claude Desktop to local compatible service.
+//!
+//! Shared by ClaudeDeskDown and Codex++. Host implements [`Host`] (state dir, settings, upstream, dictation service),
+//! installed once at process startup via [`install_host`], then [`status`] / [`configure`] / [`perform`] etc. called.
+
+mod backend;
+pub mod cli_import;
+pub mod desktop;
+pub mod fsutil;
+mod host;
+pub mod node;
+pub mod session_sync;
+pub mod settings;
+pub mod sysproxy;
+#[cfg(windows)]
+pub mod winproc;
+
+#[cfg(feature = "dictation")]
+pub mod dictation;
+
+pub use backend::{
+    ClaudeLocalResult, ClaudeLocalStatus, TemplateVersion, configure, friendly_model_name, inherited_context_tokens,
+    launch_claude, perform, pick_context_tokens, private_dir, reap_stale_proxy, resume_attached_proxy,
+    shutdown_on_exit, status, stop_backend,
+};
+pub use host::{Host, Upstream, install_host};
+pub use settings::ClaudeLocalSettings;
+
+/// On Windows, spawn child processes without console window.
+#[cfg(windows)]
+pub const CREATE_NO_WINDOW: u32 = 0x08000000;

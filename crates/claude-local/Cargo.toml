@@ -1,0 +1,51 @@
+[package]
+name = "claude-local"
+description = "Claude Desktop full-feature mode core: local compatible service, certificates, profile switching and launch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# Local dictation: SenseVoice model download / transcription engine + transcription service for local compatible service (enabled for ClaudeDeskDown; Codex++ uses its own helper).
+dictation = ["dep:sherpa-onnx", "dep:tokio", "dep:tokio-tungstenite", "dep:futures-util", "dep:reqwest", "dep:http"]
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+directories.workspace = true
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "pem", "ring"] }
+serde.workspace = true
+serde_json.workspace = true
+sha1 = "0.10"
+sha2.workspace = true
+time = "0.3"
+url = "2"
+uuid.workspace = true
+futures-util = { workspace = true, optional = true }
+http = { version = "1", optional = true }
+reqwest = { workspace = true, optional = true }
+sherpa-onnx = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["io-util", "net", "sync"] }
+tokio-tungstenite = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_Networking_WinHttp",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_Security",
+  "Win32_System_Registry",
+  "Win32_System_RemoteDesktop",
+  "Win32_System_Threading",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+tempfile.workspace = true
