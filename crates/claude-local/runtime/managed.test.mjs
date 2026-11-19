@@ -248,7 +248,10 @@ test("managed readiness reports an assigned port and health polling is not clien
   assert.equal(first.json.lastClientAt, null);
   assert.equal(second.json.lastClientAt, null);
   assert.equal(Object.hasOwn(first.json, "token"), false);
-  assert.equal(fs.statSync(path.join(root, "ready.json")).mode & 0o777, 0o600);
+  // Windows has no POSIX permission bits; the mode check is meaningful elsewhere.
+  if (process.platform !== "win32") {
+    assert.equal(fs.statSync(path.join(root, "ready.json")).mode & 0o777, 0o600);
+  }
   await request(service, "/api/bootstrap", { host: "claude.ai" });
   const active = await request(service, "/__codex_claude_local/health");
   assert.equal(typeof active.json.lastClientAt, "string");
@@ -933,7 +936,9 @@ test("RPC sends preserve model choice, switching, complete history and restart s
   const saved = JSON.parse(fs.readFileSync(path.join(root, "state.json"), "utf8"));
   assert.equal(saved.conversations[0].turns[0].model, modelIds[1]);
   assert.equal(saved.conversations[0].model, modelIds[2]);
-  assert.equal(fs.statSync(path.join(root, "state.json")).mode & 0o777, 0o600);
+  if (process.platform !== "win32") {
+    assert.equal(fs.statSync(path.join(root, "state.json")).mode & 0o777, 0o600);
+  }
   service = await start();
   await rpc("SendAndSettle", send(conv, "third test"));
   assert.equal(received.at(-1).body.model, modelIds[2]);

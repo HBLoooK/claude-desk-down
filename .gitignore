@@ -4,4 +4,5 @@ dist/
 crates/claude-local/runtime/.cache/
 crates/claude-local/runtime/mock/
 crates/claude-local/runtime/vendor/
+crates/claude-local/runtime/ca/
 .DS_Store
