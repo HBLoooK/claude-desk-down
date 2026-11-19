@@ -59,14 +59,22 @@ Welcome issues and PRs — let's make Claude Desktop work better!
 ```bash
 cd apps/claude-deskdown
 npm install
-npm run check && npm test          # Frontend
-cargo test --workspace             # Rust (from repo root)
-npx tauri build --bundles app      # Build macOS .app
-node scripts/relaunch-local.mjs    # Build and restart local instance (from repo root)
+npm run check && npm test            # Frontend type check + unit tests
+cargo test --workspace               # Rust, from repo root (needs rustc >= 1.90)
+npx tauri dev                        # Run the app locally
+npx tauri build                      # Windows installer (targets = ["nsis"])
 ```
 
+macOS: `bundle.targets` is trimmed to Windows for day-to-day development; restore
+`["app", "dmg"]` in `apps/claude-deskdown/src-tauri/tauri.conf.json`, then
+`npx tauri build --bundles app,dmg` (needs a signing identity for distribution).
+
+Updater artifacts need a signing key pair:
+set `TAURI_SIGNING_PRIVATE_KEY` (and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`) before building,
+otherwise `createUpdaterArtifacts` fails and auto-update cannot verify.
+
 Core Node tests: `cd crates/claude-local/runtime && node --test managed.test.mjs proxy.test.mjs`  
-(requires local test certs: `scripts/gen-ca.sh`)
+(requires local test certs: `scripts/gen-ca.sh`, needs bash + OpenSSL)
 
 ## License
 
