@@ -27,6 +27,8 @@ Download: [Releases](https://github.com/HBLoooK/claude-desk-down/releases/latest
 
 A local compatible service runs on your machine, intercepting Claude Desktop's account and feature requests: account info and feature flags return "logged in", while chat requests forward to your configured upstream. Certificates only work locally — revoke trust anytime.
 
+Base URLs can be given with or without a trailing `/v1`. If the upstream has no Anthropic `/v1/messages` route (NVIDIA NIM, other OpenAI-only gateways), the local service automatically falls back to `/v1/chat/completions` and translates requests and responses both ways, including streaming and tool calls. Anthropic-compatible upstreams are forwarded unchanged.
+
 ## Features
 
 - **Login-mode experience**: Chat / Code / Cowork tabs all work — it's the original client, not a web wrapper

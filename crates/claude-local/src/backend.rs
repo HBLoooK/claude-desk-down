@@ -71,6 +71,10 @@ const ASSETS: &[(&str, &[u8])] = &[
         include_bytes!("../runtime/runtime.mjs"),
     ),
     (
+        "openai-bridge.mjs",
+        include_bytes!("../runtime/openai-bridge.mjs"),
+    ),
+    (
         "official-assets.mjs",
         include_bytes!("../runtime/official-assets.mjs"),
     ),

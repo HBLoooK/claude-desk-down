@@ -144,7 +144,10 @@ function email(value) {
 export function gatewayTarget(config, requestPath) {
   const target = new URL(config.gateway);
   const requested = new URL(requestPath, "http://localhost");
-  target.pathname = `${target.pathname.replace(/\/+$/, "")}/${requested.pathname.replace(/^\/+/, "")}`;
+  // Base URLs may already include /v1 (NVIDIA NIM, OpenAI-style gateways);
+  // never turn /v1 + /v1/messages into /v1/v1/messages.
+  const base = target.pathname.replace(/\/+$/, "").replace(/\/v1$/, "");
+  target.pathname = `${base}/${requested.pathname.replace(/^\/+/, "")}`;
   target.search = requested.search;
   return target;
 }

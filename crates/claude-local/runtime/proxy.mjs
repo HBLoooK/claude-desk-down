@@ -29,6 +29,7 @@ import { createConversationService } from "./conversation-service.mjs";
 import { isPatchedStartupAsset, startupAssets } from "./scripts/patch-dictation-start.mjs";
 import { createGatewayStreamParser, createStateStore, gatewayBody, gatewayHttpError, gatewayModel, gatewayTarget, isPrivateFile, mergePoolModels, modelList, modelSelectors, modelWindow, planProfile, runtimeConfig } from "./runtime.mjs";
 import { createOfficialAssets } from "./official-assets.mjs";
+import { fromOpenAI, openAISSEToAnthropic, toOpenAI } from "./openai-bridge.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const runtime = runtimeConfig();
@@ -1685,7 +1686,8 @@ function serveDocShell(req, res, url) {
 function forwardGateway(req, res, requestPath, raw) {
   let body = raw;
   const requested = new URL(requestPath, "http://localhost");
-  if (req.method === "POST" && requested.pathname === "/v1/messages") {
+  const isMessages = req.method === "POST" && requested.pathname === "/v1/messages";
+  if (isMessages) {
     try { body = gatewayBody(runtime, raw); }
     catch { return json(res, { error: "Invalid model request" }, 400); }
   }
@@ -1699,6 +1701,11 @@ function forwardGateway(req, res, requestPath, raw) {
     hostname: target.hostname, port: target.port || (target.protocol === "https:" ? 443 : 80),
     path: target.pathname + target.search, method: req.method, headers, timeout: 300000,
   }, (response) => {
+    // Anthropic route missing (OpenAI-only gateway): retry as chat/completions.
+    if (isMessages && (response.statusCode === 404 || response.statusCode === 405) && !res.headersSent) {
+      response.resume();
+      return forwardOpenAI(req, res, body, target, Boolean((() => { try { return JSON.parse(body.toString("utf8")).stream; } catch { return false; } })()));
+    }
     res.writeHead(response.statusCode, response.headers);
     response.pipe(res);
   });
@@ -1709,6 +1716,51 @@ function forwardGateway(req, res, requestPath, raw) {
   });
   req.once("aborted", () => up.destroy());
   up.end(body);
+}
+
+/** Fallback for OpenAI-compatible upstreams (NVIDIA NIM, etc.). */
+function forwardOpenAI(req, res, body, target, stream) {
+  let parsed;
+  try { parsed = JSON.parse(body.toString("utf8")); }
+  catch { return json(res, { type: "error", error: { type: "api_error", message: "Invalid model request" } }, 400); }
+  const outgoing = Buffer.from(JSON.stringify(toOpenAI(parsed)));
+  const url = new URL(target.toString());
+  url.pathname = url.pathname.replace(/\/v1\/messages\/?$/, "") + "/v1/chat/completions";
+  const headers = {
+    "content-type": "application/json",
+    "content-length": outgoing.length,
+    "x-api-key": runtime.key,
+    authorization: `Bearer ${runtime.key}`,
+  };
+  const chunks = [];
+  const up = (url.protocol === "https:" ? https : http).request({
+    hostname: url.hostname, port: url.port || (url.protocol === "https:" ? 443 : 80),
+    path: url.pathname + url.search, method: "POST", headers, timeout: 300000,
+  }, (response) => {
+    response.on("data", (chunk) => chunks.push(chunk));
+    response.on("end", () => {
+      const text = Buffer.concat(chunks).toString("utf8");
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        const detail = text.replace(/\s+/g, " ").slice(0, 300);
+        return json(res, { type: "error", error: { type: "api_error", message: `Upstream returned ${response.statusCode}: ${detail}` } }, 502);
+      }
+      if (stream) {
+        res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store" });
+        return res.end(openAISSEToAnthropic(text, parsed.model));
+      }
+      let reply;
+      try { reply = JSON.parse(text); }
+      catch { return json(res, { type: "error", error: { type: "api_error", message: "Invalid upstream response" } }, 502); }
+      return json(res, fromOpenAI(reply, parsed.model));
+    });
+  });
+  up.on("timeout", () => up.destroy(new Error("gateway timeout")));
+  up.on("error", () => {
+    if (res.headersSent) return res.destroy();
+    json(res, { type: "error", error: { type: "api_error", message: "Local gateway unavailable" } }, 502);
+  });
+  req.once("aborted", () => up.destroy());
+  up.end(outgoing);
 }
 
 // 测试/运维可把某主机的上游重定向到本地 fixture；默认保留原始主机走 https。
